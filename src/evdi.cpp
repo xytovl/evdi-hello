@@ -32,7 +32,6 @@ public:
 		frame_duration = std::chrono::duration_cast<decltype(frame_duration)>(std::chrono::duration<double>(1/fps));
 		if (handle == EVDI_INVALID_HANDLE)
 			throw std::runtime_error("failed to open evdi device");
-		//mode_changed_handler(evdi_mode{maxwidth, maxheight, int(fps), 4, 0}, this);
 		evdi_connect(handle, edid.data(), edid.size(), maxwidth * maxheight);
 
 		thread = std::thread([this](){run();});
@@ -173,7 +172,7 @@ void EvdiDevice::mode_changed_handler(evdi_mode mode, void *user_data)
 			{
 				evdi_unregister_buffer(self.handle, i);
 			}
-			buffer.resize(mode.width * mode.height * mode.bits_per_pixel);
+			buffer.resize(mode.width * mode.height * mode.bits_per_pixel / 8);
 			buffer.shrink_to_fit();
 
 			evdi_buffer ev_buffer{
@@ -181,7 +180,7 @@ void EvdiDevice::mode_changed_handler(evdi_mode mode, void *user_data)
 					.buffer = buffer.data(),
 					.width = mode.width,
 					.height = mode.height,
-					.stride = mode.width * mode.bits_per_pixel,
+					.stride = mode.width * mode.bits_per_pixel / 8,
 					.rects = nullptr,
 					.rect_count = 0
 			};
