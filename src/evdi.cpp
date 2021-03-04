@@ -2,6 +2,7 @@
 #include <bits/types/struct_timeval.h>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <initializer_list>
@@ -22,6 +23,8 @@
 #include <stb/stb_image_write.h>
 
 #include "edid.h"
+
+static constexpr unsigned int alignment = 128;
 
 class EvdiDevice
 {
@@ -146,12 +149,12 @@ void EvdiDevice::mode_changed_handler(evdi_mode mode, void *user_data)
 			{
 				evdi_unregister_buffer(self.handle, i);
 			}
-			buffer.resize(mode.width * mode.height * mode.bits_per_pixel / 8);
+			buffer.resize(alignment + mode.width * mode.height * mode.bits_per_pixel / 8);
 			buffer.shrink_to_fit();
 
 			evdi_buffer ev_buffer{
 				.id = int(i),
-					.buffer = buffer.data(),
+					.buffer = buffer.data() + (intptr_t(buffer.data()) % alignment),
 					.width = mode.width,
 					.height = mode.height,
 					.stride = mode.width * mode.bits_per_pixel / 8,
@@ -173,7 +176,13 @@ void EvdiDevice::update_ready_handler(int buffer_to_be_updated, void *user_data)
 	int num_rects;
 	auto start = std::chrono::steady_clock::now();
 	evdi_grab_pixels(self.handle, rects.data(), &num_rects);
-	std::cout << "grab_pixel time(us): " << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count() << std::endl;
+	auto now = std::chrono::steady_clock::now();
+	std::cout << "grab_pixel time(us): " << std::chrono::duration_cast<std::chrono::microseconds>(now - start).count()
+		<< " rects: " << num_rects << std::endl;
+	for (int i = 0 ; i < num_rects ; ++i)
+	{
+		std::cout << "  " << rects[i].x1 << "-" << rects[i].x2 << "x" << rects[i].y1 << "-" << rects[i].y2 << std::endl;
+	}
 
 	self.last_buffer = buffer_to_be_updated;
 }
@@ -194,7 +203,7 @@ int main()
 		std::string filename = "frame" + std::to_string(frame).substr(1) + ".png";
 		const auto & buffer = device.get_buffer();
 		if (not buffer.empty())
-			stbi_write_png(filename.c_str(), 1920, 1080, 4, buffer.data()+1, 1920*4);
+			stbi_write_png(filename.c_str(), 1920, 1080, 4, buffer.data()+1 + (intptr_t(buffer.data()) % alignment), 1920*4);
 	}
 
 }

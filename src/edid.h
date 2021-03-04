@@ -1,6 +1,5 @@
 #include <array>
 #include <cstdint>
-#include <fstream>
 
 class EDID
 {
