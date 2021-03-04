@@ -26,15 +26,12 @@
 class EvdiDevice
 {
 public:
-	EvdiDevice(const EDID & edid, int maxwidth, int maxheight, double fps)
+	EvdiDevice(const EDID & edid, int maxwidth, int maxheight)
 	{
 		handle = evdi_open(1);
-		frame_duration = std::chrono::duration_cast<decltype(frame_duration)>(std::chrono::duration<double>(1/fps));
 		if (handle == EVDI_INVALID_HANDLE)
 			throw std::runtime_error("failed to open evdi device");
 		evdi_connect(handle, edid.data(), edid.size(), maxwidth * maxheight);
-
-		thread = std::thread([this](){run();});
 	}
 
 	~EvdiDevice()
@@ -51,30 +48,10 @@ public:
 		evdi_close(handle);
 	}
 
-	void stop() {
-		stop_request = true;
-		thread.join();
-	}
-
 	const std::vector<char> & get_buffer()
 	{
-		std::unique_lock<std::mutex> lock(index_mutex);
-		while (user_buffer == last_buffer)
-		{
-			auto start = std::chrono::steady_clock::now();
-			buffer_ready.wait(lock);
-			std::cout << "waited for frame " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <<std::endl;
-		}
-		user_buffer = last_buffer;
-		buffer_ready.notify_all();
-		return buffers[user_buffer];
-	}
-
-private:
-	void run()
-	{
+		int next_buffer = (last_buffer + 1) % buffers.size();
 		int evdi_fd = evdi_get_event_ready(handle);
-		auto next_frame = std::chrono::steady_clock::now();
 
 		evdi_event_context handlers{
 			.dpms_handler = dpms_handler,
@@ -85,18 +62,14 @@ private:
 				.cursor_move_handler = nullptr,
 				.user_data = this 
 		};
-		while (not stop_request)
+		while (buffers[0].empty())
 		{
-			timeval timeout{
-				.tv_sec = 0,
-					.tv_usec = std::chrono::duration_cast<std::chrono::microseconds>(next_frame - std::chrono::steady_clock::now()).count()
-			};
 			fd_set read_fd, write_fd, except_fd;
 			FD_ZERO(&read_fd);
 			FD_SET(evdi_fd, &read_fd);
 			FD_ZERO(&write_fd);
 			FD_ZERO(&except_fd);
-			int count = select(evdi_fd + 1, &read_fd, &write_fd, &except_fd, &timeout);
+			int count = select(evdi_fd + 1, &read_fd, &write_fd, &except_fd, NULL);
 			if (count < 0) {
 				std::cerr << strerror(errno) << ": " << count << std::endl;
 				std::abort();
@@ -105,36 +78,38 @@ private:
 				std::cout << "events ready to process" << std::endl;
 				evdi_handle_events(handle, &handlers);
 			}
-			std::this_thread::sleep_until(next_frame);
-			int next_buffer;
+		}
+		if (evdi_request_update(handle, next_buffer))
+			update_ready_handler(next_buffer, this);
+		else
+		{
+			while (next_buffer != last_buffer)
 			{
-				std::unique_lock<std::mutex> lock(index_mutex);
-				next_buffer = (last_buffer + 1) % buffers.size();
-				if (next_buffer == user_buffer)
+				fd_set read_fd, write_fd, except_fd;
+				FD_ZERO(&read_fd);
+				FD_SET(evdi_fd, &read_fd);
+				FD_ZERO(&write_fd);
+				FD_ZERO(&except_fd);
+				int count = select(evdi_fd + 1, &read_fd, &write_fd, &except_fd, NULL);
+				if (count < 0) {
+					std::cerr << strerror(errno) << ": " << count << std::endl;
+					std::abort();
+				} else if (count == 1)
 				{
-					next_buffer = (next_buffer + 1) % buffers.size();
+					std::cout << "events ready to process" << std::endl;
+					evdi_handle_events(handle, &handlers);
 				}
 			}
-			if (not buffers[0].empty() && evdi_request_update(handle, next_buffer))
-				update_ready_handler(next_buffer, this);
-			while (next_frame < std::chrono::steady_clock::now())
-			{
-				next_frame += frame_duration;
-			}
 		}
+		return buffers[last_buffer];
 	}
+
+private:
 	evdi_handle handle;
-
-	std::mutex index_mutex;
 	int last_buffer = 0;
-	int user_buffer = 0;
-	std::condition_variable buffer_ready;
-	std::array<std::vector<char>, 3> buffers;
-	evdi_mode current_mode;
 
-	std::thread thread;
-	std::atomic_bool stop_request{false};
-	std::chrono::microseconds frame_duration;
+	std::array<std::vector<char>, 2> buffers;
+	evdi_mode current_mode;
 
 	static void dpms_handler(int dpms_mode, void *user_data);
 	static void mode_changed_handler(struct evdi_mode mode, void *user_data);
@@ -166,13 +141,6 @@ void EvdiDevice::mode_changed_handler(evdi_mode mode, void *user_data)
 	{
 		for (std::size_t i = 0 ; i < self.buffers.size() ; ++i)
 		{
-			{
-				std::unique_lock<std::mutex> lock(self.index_mutex);
-				while (not self.buffers[i].empty() and int(i) == self.user_buffer)
-				{
-					self.buffer_ready.wait(lock);
-				}
-			}
 			auto & buffer = self.buffers[i];
 			if (not buffer.empty())
 			{
@@ -207,12 +175,7 @@ void EvdiDevice::update_ready_handler(int buffer_to_be_updated, void *user_data)
 	evdi_grab_pixels(self.handle, rects.data(), &num_rects);
 	std::cout << "grab_pixel time(us): " << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count() << std::endl;
 
-	std::unique_lock<std::mutex> lock(self.index_mutex);
-	if (self.last_buffer != self.user_buffer) {
-		std::cout << "frame lost" << std::endl;
-	}
 	self.last_buffer = buffer_to_be_updated;
-	self.buffer_ready.notify_all();
 }
 
 int main()
@@ -220,7 +183,7 @@ int main()
 	EDID edid("PVR");
 	edid.add_mode(1920, EDID::aspect_ratio::r16_9, 60);
 
-	EvdiDevice device(edid, 1920, 1080, 60);
+	EvdiDevice device(edid, 1920, 1080);
 
 	int frame = 1000;
 	for (
@@ -230,9 +193,8 @@ int main()
 	{
 		std::string filename = "frame" + std::to_string(frame).substr(1) + ".png";
 		const auto & buffer = device.get_buffer();
-		stbi_write_png(filename.c_str(), 1920, 1080, 4, buffer.data()+1, 1920*4);
+		if (not buffer.empty())
+			stbi_write_png(filename.c_str(), 1920, 1080, 4, buffer.data()+1, 1920*4);
 	}
-
-	device.stop();
 
 }
