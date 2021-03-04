@@ -153,7 +153,13 @@ void EvdiDevice::dpms_handler(int dpms_mode, void* user_data)
 void EvdiDevice::mode_changed_handler(evdi_mode mode, void *user_data)
 {
 	EvdiDevice &self = *(EvdiDevice *)user_data;
-	std::cerr << "mode changed: " << mode.width << "x" << mode.height << std::endl;
+	std::cerr << "mode changed: " << mode.width << "x" << mode.height
+		<< "(" << mode.bits_per_pixel << "bpp "
+		<< (char)mode.pixel_format
+		<< (char)(mode.pixel_format >> 8)
+		<< (char)(mode.pixel_format >> 16)
+		<< (char)(mode.pixel_format >> 24)
+		<< ")" << std::endl;
 
 	if (self.current_mode.width * self.current_mode.height * self.current_mode.bits_per_pixel
 			!= mode.width * mode.height * mode.bits_per_pixel)
@@ -199,7 +205,7 @@ void EvdiDevice::update_ready_handler(int buffer_to_be_updated, void *user_data)
 	int num_rects;
 	auto start = std::chrono::steady_clock::now();
 	evdi_grab_pixels(self.handle, rects.data(), &num_rects);
-	std::cout << "grab_pixel time(ms): " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() << std::endl;
+	std::cout << "grab_pixel time(us): " << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count() << std::endl;
 
 	std::unique_lock<std::mutex> lock(self.index_mutex);
 	if (self.last_buffer != self.user_buffer) {
@@ -224,7 +230,7 @@ int main()
 	{
 		std::string filename = "frame" + std::to_string(frame).substr(1) + ".png";
 		const auto & buffer = device.get_buffer();
-    stbi_write_png(filename.c_str(), 1920, 1080, 4, buffer.data(), 1920*4);
+		stbi_write_png(filename.c_str(), 1920, 1080, 4, buffer.data()+1, 1920*4);
 	}
 
 	device.stop();
